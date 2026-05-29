@@ -3,6 +3,11 @@
 ## Visão Geral
 Ferramenta para anonimização de documentos (`.pdf`, `.docx`, `.txt`), projetada para processar e redigir informações sensíveis e dados pessoais. A ferramenta trata a anonimização de documentos do Sistema Eletrônico de Informações (SEI) corretamente, identificando e mascarando padrões específicos da plataforma. O script opera através de uma interface gráfica nativa (Tkinter) e de uma classe estruturada (`DocumentAnonimizer`) para uso programático.
 
+## 🚀 Executável Prontamente Disponível (Sem Código)
+Para usuários que não desejam utilizar linhas de comando ou códigos Python, o programa possui um **executável com interface gráfica nativa**, intuitivo e fácil de usar. Basta baixar e executar localmente no computador.
+
+🔗 **[Clique aqui para baixar o Executor Confiável (v1.0.0)](https://github.com/AlbertoCamposSilva/sei-anonimizer/releases/tag/v1.0.0)**
+
 ## Recursos de Anonimização
 O sistema identifica e mascara os seguintes elementos no texto e na estrutura dos arquivos:
 - **Documentos SEI:** Oculta números de 7 dígitos e Códigos de Autenticação (CRC). Em arquivos PDF, aplica tarjas sobre QR Codes e Barras Laterais de Autenticação do sistema. 
