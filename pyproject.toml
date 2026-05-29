@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sei-anonimizer"
+version = "1.0.0"
+dependencies = [
+    "pymupdf",
+    "pandas"
+]
+description = "Ferramenta para anonimização de documentos com foco no SEI."
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["sei_anonimizer*"]
+
+[tool.setuptools.package-data]
+sei-anonimizer = ["*.png"]

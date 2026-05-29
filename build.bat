@@ -1,0 +1,1 @@
+pyinstaller --noconfirm --onefile --windowed --splash "src\sei_anonimizer\loading.png" --collect-all spacy --collect-all pt_core_news_lg "src\sei_anonimizer\main.py"
