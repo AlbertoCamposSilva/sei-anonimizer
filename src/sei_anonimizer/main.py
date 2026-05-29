@@ -433,7 +433,7 @@ class DialogoOpcoes(tk.Toplevel):
         frame_instrucoes.pack(fill=tk.X, padx=10, pady=10)
 
         texto_instrucoes = (
-            "Anonimizer - Anonimizador de Documentos para Órgãos Públicos, versão 1.0.0.\n\n"
+            "Anonimizer - Anonimizador de Documentos para Órgãos Públicos, versão 1.0.3.\n\n"
             "Programa desenvolvido por Alberto de Campos e Silva.\n"
             "Este software é de distribuição livre, licenciado sob a Licença Apache 2.0.\n\n"
             "Aviso de Segurança:\n"
