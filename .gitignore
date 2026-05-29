@@ -1,0 +1,16 @@
+# Executáveis e Builds
+*.exe
+build/
+dist/
+*.build/
+*.dist/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# Arquivos de teste e dados locais
+*.pdf
+*.csv
