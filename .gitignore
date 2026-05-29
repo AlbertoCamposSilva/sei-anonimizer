@@ -1,16 +1,41 @@
-# Executáveis e Builds
-*.exe
-build/
-dist/
-*.build/
-*.dist/
-
-# Python
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
-*.egg-info/
-.venv/
+*$py.class
 
-# Arquivos de teste e dados locais
+# C extensions
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# IDE / Editor Settings
+.vscode/
+.idea/
+*.code-workspace
+
+# Sistema Operacional
+.DS_Store
+Thumbs.db
+
+# Logs e arquivos de crash (importante remover o log de crash do Nuitka que você tem na pasta)
+*.log
+nuitka-crash-report.xml
+
+# Seus arquivos de teste e dados locais (conforme solicitado, mas cuidado: 
+# se precisar deles para rodar testes, remova esta seção)
 *.pdf
 *.csv
