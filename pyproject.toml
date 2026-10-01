@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sei-anonimizer"
-version = "1.1.0"
+version = "1.1.1"
 description = "Ferramenta para anonimização de documentos e textos com foco no SEI e conformidade com LGPD."
 readme = "README.md"
 requires-python = ">=3.9"

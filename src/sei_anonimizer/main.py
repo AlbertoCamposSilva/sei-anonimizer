@@ -37,7 +37,7 @@ docx = None  # Carregado sob demanda em _processar_docx
 try:
     __version__ = version("sei_anonimizer")
 except PackageNotFoundError:
-    __version__ = "1.1.0"
+    __version__ = "1.1.1"
 
 # Importa módulos internos especializados
 from sei_anonimizer.gazetteer import (
