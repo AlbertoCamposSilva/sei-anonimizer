@@ -9,6 +9,8 @@ __pycache__/
 # Distribution / packaging
 build/
 dist/
+dist_nuitka/
+build_cache/
 *.egg-info/
 *.egg
 .eggs/

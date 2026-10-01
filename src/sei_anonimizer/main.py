@@ -15,6 +15,12 @@ import logging
 import threading
 from typing import Dict, List, Set, Optional, Tuple, Any
 from importlib.metadata import version, PackageNotFoundError
+
+# Garante resolução do pacote raiz quando executado standalone ou compilado via Nuitka
+_pkg_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _pkg_root not in sys.path:
+    sys.path.insert(0, _pkg_root)
+
 # pymupdf e docx são importados sob demanda (lazy loading)
 try:
     import tkinter as tk
@@ -285,8 +291,6 @@ class DocumentAnonimizer:
         elif extensao == 'txt':
             return self._processar_txt(caminho_entrada, caminho_saida)
         elif extensao == 'docx':
-            if not docx:
-                raise ImportError("A biblioteca python-docx não está instalada. Execute: pip install python-docx")
             return self._processar_docx(caminho_entrada, caminho_saida)
         else:
             raise ValueError(f"Formato de arquivo não suportado: .{extensao}")
@@ -929,6 +933,19 @@ def iniciar_interface_grafica():
         pyi_splash.close()
     except ImportError:
         pass
+
+    # Encerra splash screen do Nuitka (onefile) se presente
+    if "NUITKA_ONEFILE_PARENT" in os.environ:
+        try:
+            import tempfile
+            splash_filename = os.path.join(
+                tempfile.gettempdir(),
+                f"onefile_{int(os.environ['NUITKA_ONEFILE_PARENT'])}_splash_feedback.tmp",
+            )
+            if os.path.exists(splash_filename):
+                os.unlink(splash_filename)
+        except Exception:
+            pass
 
     if sys.platform == "win32":
         try:
