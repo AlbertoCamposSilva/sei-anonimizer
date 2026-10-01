@@ -1,133 +1,118 @@
-# Anonimizador de Documentos
+# Anonimizador de Documentos e Textos para Órgãos Públicos (SEI-Anonimizer)
 
 ## Visão Geral
-Ferramenta para anonimização de documentos (`.pdf`, `.docx`, `.txt`), projetada para processar e redigir informações sensíveis e dados pessoais. A ferramenta trata a anonimização de documentos do Sistema Eletrônico de Informações (SEI) corretamente, identificando e mascarando padrões específicos da plataforma. O script opera através de uma interface gráfica nativa (Tkinter) e de uma classe estruturada (`DocumentAnonimizer`) para uso programático.
+Biblioteca Python e ferramenta desktop para anonimização e redação segura de dados sensíveis e pessoais, desenvolvida em conformidade com a LGPD e especializada em atos administrativos e no **Sistema Eletrônico de Informações (SEI)**.
+
+O pacote oferece duas soluções integradas:
+1. **`AnonimizadorTexto`:** Anonimização reversível de strings em memória para **LLMs, Chat, RAG e Embeddings**, substituindo dados pessoais por marcadores (`[EMAIL_1]`, `[TELEFONE_1]`, `[CPF_1]`, `[RG_1]`) com capacidade de restaurar os dados reais nas respostas de IA. Possui **zero dependências externas**.
+2. **`DocumentAnonimizer`:** Redação definitiva física e lógica de documentos (`.pdf`, `.docx`, `.txt`) com remoção de links, tarjamento de QR Codes e barras laterais do SEI, tolerância a anomalias de PDFs (*kerning*, quebras de linha e hifenização) e **interface gráfica nativa persistente (Tkinter)** com suporte a monitores High-DPI no Windows.
+
+---
+
+## 📚 Documentação do Projeto
+
+O projeto conta com documentação detalhada na pasta [`documentacao/`](./documentacao):
+
+- 🤖 **[Instruções para Agentes e LLMs (SKILL_ANONIMIZADOR.md)](./documentacao/SKILL_ANONIMIZADOR.md):** Manual completo para LLMs e agentes inteligentes aprenderem os múltiplos padrões de chamada do pacote (fluxos bidirecionais de RAG, sessões multi-turno, cache semântico e arquivos físicos).
+- 🧑‍💻 **[Guia do Desenvolvedor (GUIA_DO_DESENVOLVEDOR.md)](./documentacao/GUIA_DO_DESENVOLVEDOR.md):** Guia técnico com arquitetura, exemplos práticos em Python, processamento em lote e construção de executáveis.
+
+---
 
 ## 🚀 Executável Prontamente Disponível (Sem Código)
-Para usuários que não desejam utilizar linhas de comando ou códigos Python, o programa possui um **executável com interface gráfica nativa**, intuitivo e fácil de usar. Basta baixar e executar localmente no computador.
+Para usuários que não desejam utilizar linhas de comando ou códigos Python, o programa possui um **executável com interface gráfica nativa**, intuitivo e fácil de usar.
 
-🔗 **[Clique aqui para baixar o Executor Confiável (v1.0.0)](https://github.com/AlbertoCamposSilva/sei-anonimizer/releases/tag/v1.0.0)**
+🔗 **[Clique aqui para baixar o Executável](https://github.com/AlbertoCamposSilva/sei-anonimizer/releases)**
+
+---
 
 ## Recursos de Anonimização
-O sistema identifica e mascara os seguintes elementos no texto e na estrutura dos arquivos:
-- **Documentos SEI:** Oculta números de 7 dígitos e Códigos de Autenticação (CRC). Em arquivos PDF, aplica tarjas sobre QR Codes e Barras Laterais de Autenticação do sistema. 
-- **CPF:** Formato de saída `***.XXX.XXX-**`
-- **RG e Data de Expedição**
-- **E-mails e Telefones**
-- **Links:** Remoção de hiperlinks da estrutura do arquivo (PDF) ou substituição no texto (`.docx`, `.txt`).
-- **Nomes Próprios:** Identificação por Processamento de Linguagem Natural (NLP) via `spaCy` e expressões regulares de resgate.
 
-## Requisitos e Dependências
-O projeto requer Python 3.x e as seguintes bibliotecas:
-- `PyMuPDF` (`fitz`): Para leitura e manipulação das camadas do PDF.
-- `python-docx`: Para processamento de arquivos Microsoft Word.
-- `spacy`: Para o motor de NLP.
-- Modelo NLP do spaCy: `pt_core_news_lg`.
+- **Anonimização Reversível para LLMs (`AnonimizadorTexto`):**
+  - Marcadores sequenciais por tipo (`[EMAIL_n]`, `[TELEFONE_n]`, `[CPF_n]`, `[RG_n]`).
+  - Restauração tolerante a formatações geradas por IA (`[email_1]`, `EMAIL_1`, etc.).
+  - Preservação de nomes próprios e institucionais no modo texto para manter o contexto conversacional da LLM.
+- **Documentos SEI:** Oculta números de 7 dígitos e Códigos de Autenticação (CRC). Em arquivos PDF, aplica tarjas físicas pretas sobre a barra lateral de autenticação e tarjas brancas sobre o QR Code.
+- **CPF:** Formato de saída `***.XXX.XXX-**` ou marcadores sequenciais. Suporta CPFs com e sem pontuação.
+- **RG e Data de Expedição:** Ocultação contextual.
+- **E-mails e Telefones:** Suporte a `+55`, DDD e descarte de números públicos (`0800`/`0300`).
+- **Filtro Estrito Contra Falsos Positivos:** Não mascara números de processos SEI (`23000.012345/2026-11`), anos (`2026-2030`), valores monetários (`R$ 1.234,56`), termos de chamada pública (`Chamada 10/2026`) ou datas.
+- **Termos Específicos Customizados:** Localiza termos arbitrários mesmo sob distorções de PDFs (*kerning* `A  l  b  e  r  t  o`, quebras de linha `Alberto\nde Campos` ou hifenizações `Alber-\nto`).
 
-### Instalação
+---
+
+## Requisitos e Instalação
+
+### Instalação via `uv` (Recomendado)
 ```bash
-pip install PyMuPDF python-docx spacy
-python -m spacy download pt_core_news_lg
+# Apenas para texto (Chat, RAG, LLM - Ultra-leve, zero dependências):
+uv add sei-anonimizer
 
+# Para processamento de arquivos PDF e Word (.docx):
+uv add "sei-anonimizer[arquivos]"
+
+# Para suporte completo (incluindo NLP spaCy para nomes complexos em documentos):
+uv add "sei-anonimizer[all]"
 ```
 
-## Uso Programático (Classe `DocumentAnonimizer`)
+### Instalação via `pip`
+```bash
+pip install sei-anonimizer
+pip install "sei-anonimizer[arquivos]"
+```
 
-A classe `DocumentAnonimizer` é a interface principal para integrar a anonimização em fluxos de dados ou automações. Deve ser utilizada via gerenciador de contexto (`with`) para gerenciar o estado da execução.
+---
 
-### Estrutura de Opções
+## Exemplos Rápidos de Uso
 
-O comportamento da classe é definido por um dicionário passado no momento da instanciação. O padrão, caso omitido, é:
-
+### 1. Anonimização Reversível para LLM/RAG (Modo Texto)
 ```python
-opcoes_padrao = {
+from sei_anonimizer import AnonimizadorTexto
+
+anon = AnonimizadorTexto()
+
+# IDA: Anonimiza o prompt antes de enviar à LLM
+prompt_usuario = "Favor enviar o parecer para carlos@cnpq.br. O CPF do bolsista é 111.222.333-44."
+prompt_seguro = anon.anonimizar(prompt_usuario)
+# "Favor enviar o parecer para [EMAIL_1]. O CPF do bolsista é [CPF_1]."
+
+# VOLTA: Restaura os dados reais na resposta para o usuário autorizado
+resposta_llm = "Parecer enviado com sucesso para [EMAIL_1] referente ao [CPF_1]."
+resposta_final = anon.restaurar(resposta_llm)
+# "Parecer enviado com sucesso para carlos@cnpq.br referente ao 111.222.333-44."
+```
+
+### 2. Processamento Físico de PDF com Termos Customizados
+```python
+from sei_anonimizer import DocumentAnonimizer
+
+opcoes = {
     "cpf": True,
     "rg": True,
     "email_tel": True,
     "doc_sei": True,
     "qr_code": True,
-    "links": True,
-    "nomes": False,
-    "modo_nomes": "iniciais"  # Alternativa: "total" para [NOME]
+    "termos_customizados": ["Mariana Souza", "Empresa XPTO Ltda."]
 }
 
+with DocumentAnonimizer(opcoes=opcoes) as anon:
+    caminho_saida = anon.processar_arquivo("documento.pdf")
+    print(f"Arquivo redigido: {caminho_saida}")
 ```
 
-### Exemplo 1: Processamento de Arquivo Único
-
-Demonstração de configuração para mascarar apenas CPFs e Nomes em um arquivo de texto.
-
-```python
-from anonimizer import DocumentAnonimizer
-
-config = {
-    "cpf": True,
-    "nomes": True,
-    "modo_nomes": "total", # Substitui nomes identificados por [NOME]
-    "email_tel": False,
-    "rg": False,
-    "doc_sei": False,
-    "qr_code": False,
-    "links": False
-}
-
-with DocumentAnonimizer(opcoes=config) as anonimizador:
-    # Se o caminho de saída for omitido, gera o arquivo com sufixo '_anonimizado.docx'
-    caminho_saida = anonimizador.processar_arquivo("C:/caminho/para/documento.docx")
-    print(f"Documento tratado salvo em: {caminho_saida}")
-
-```
-
-### Exemplo 2: Processamento em Lote (Automação de Diretórios)
-
-Demonstração de varredura em um diretório definindo um caminho de saída customizado.
-
-```python
-import os
-from anonimizer import DocumentAnonimizer
-
-pasta_origem = "dados/originais"
-pasta_destino = "dados/anonimizados"
-extensoes_suportadas = ('.pdf', '.docx', '.txt')
-
-os.makedirs(pasta_destino, exist_ok=True)
-
-# Utiliza as opções padrão
-with DocumentAnonimizer() as anonimizador:
-    for arquivo in os.listdir(pasta_origem):
-        if arquivo.lower().endswith(extensoes_suportadas):
-            caminho_in = os.path.join(pasta_origem, arquivo)
-            caminho_out = os.path.join(pasta_destino, f"tratado_{arquivo}")
-            
-            try:
-                anonimizador.processar_arquivo(caminho_in, caminho_out)
-                print(f"Sucesso: {arquivo}")
-            except Exception as e:
-                print(f"Falha ao processar {arquivo}: {e}")
-
-```
-
-## Referência de Métodos
-
-* `__init__(self, opcoes: Dict[str, bool] = None)`: Inicializa a classe. Atribui o dicionário de opções.
-* `processar_arquivo(self, caminho_entrada: str, caminho_saida: str = None) -> str`: Roteia a execução com base na extensão do arquivo (`.pdf`, `.docx`, `.txt`). Aplica as marcações de redação nas coordenadas identificadas (PDF) ou substitui as cadeias de caracteres diretamente no texto (DOCX/TXT). Retorna o caminho do arquivo gerado.
-* `extrair_nomes_nlp(self, texto: str) -> Set[str]`: Executa o modelo `pt_core_news_lg` sobre a string fornecida. Filtra entidades `PER` considerando uma lista restritiva interna (`termos_protegidos`). Retorna um conjunto (`set`) de strings com os nomes validados.
+---
 
 ## Interface Gráfica
 
-Para a execução visual interativa, execute o arquivo de forma direta:
+Para abrir a interface gráfica interativa nativa:
 
 ```bash
-python anonimizer.py
-
+uv run sei-anonimizer
+# ou
+python -m sei_anonimizer.main
 ```
 
-### Considerações para Implementações Futuras e Automação
+---
 
-1. **Gestão de Memória:** O modelo `pt_core_news_lg` consome recursos na inicialização. Em fluxos que instanciam o script iterativamente, mantenha o escopo de importação em nível global para evitar recarregamento repetido do modelo.
-2. **Tratamento de Exceções em Lote:** Arquivos corrompidos ou mal formatados podem gerar erros de leitura. Mantenha os blocos `try...except` nas iterações de pasta para garantir que um arquivo danificado não interrompa a esteira de processos (conforme Exemplo 2).
-3. **Expansão de Whitelist:** Se aplicado em outros setores, modifique a variável `termos_protegidos` dentro do método `extrair_nomes_nlp` para incluir siglas departamentais específicas, mitigando a detecção de falsos positivos pelo modelo de reconhecimento de entidades nomeadas (NER).
+## Licença
 
-```
-
-```
+Distribuído sob a Licença Apache 2.0. Consulte o arquivo `LICENSE` para mais detalhes.

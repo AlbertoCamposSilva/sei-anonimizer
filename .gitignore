@@ -39,3 +39,4 @@ nuitka-crash-report.xml
 # se precisar deles para rodar testes, remova esta seção)
 *.pdf
 *.csv
+

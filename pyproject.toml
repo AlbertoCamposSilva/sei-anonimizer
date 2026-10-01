@@ -4,17 +4,79 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sei-anonimizer"
-version = "1.0.2"
-dependencies = [
-    "pymupdf",
-    "pandas"
-]
-description = "Ferramenta para anonimização de documentos com foco no SEI."
+version = "1.1.0"
+description = "Ferramenta para anonimização de documentos e textos com foco no SEI e conformidade com LGPD."
 readme = "README.md"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+authors = [
+    { name = "Alberto Campos Silva" }
+]
+keywords = [
+    "sei",
+    "anonimizacao",
+    "lgpd",
+    "pdf",
+    "docx",
+    "llm",
+    "pii",
+    "rag"
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Text Processing :: Filters",
+    "Topic :: Security",
+]
+dependencies = []
+
+[project.optional-dependencies]
+arquivos = [
+    "pymupdf",
+    "python-docx"
+]
+nlp = [
+    "spacy"
+]
+all = [
+    "pymupdf",
+    "python-docx",
+    "spacy"
+]
+dev = [
+    "pytest>=7.0",
+    "build",
+    "twine"
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0",
+    "pymupdf",
+    "python-docx",
+    "build",
+    "twine"
+]
+
+[project.urls]
+Homepage = "https://github.com/AlbertoCamposSilva/sei-anonimizer"
+Repository = "https://github.com/AlbertoCamposSilva/sei-anonimizer"
+Issues = "https://github.com/AlbertoCamposSilva/sei-anonimizer/issues"
+
+[project.scripts]
+sei-anonimizer = "sei_anonimizer.main:iniciar_interface_grafica"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["sei_anonimizer*"]
 
 [tool.setuptools.package-data]
-sei-anonimizer = ["*.png"]
+sei_anonimizer = ["*.png"]
