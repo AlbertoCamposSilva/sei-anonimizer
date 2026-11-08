@@ -80,6 +80,9 @@ opcoes = {
     "qr_code": True,
     "links": True,
     "nomes": False,  # Boot rápido sem spaCy
+    "modo_redacao_pdf": "tarja_preta",  # "tarja_preta" (padrão SEI nativo), "tarja_branca", ou "mascara_texto"
+    "sanitizar_metadados": True,        # Higieniza /Title, /Author e expurga fluxos XML XMP
+    "limpar_anotacoes": True,           # Remove anotações flutuantes/comentários com dados sensíveis
     "termos_customizados": [
         "Mariana Silva Souza",
         "Empresa XPTO Consultoria",
@@ -131,18 +134,25 @@ print(f"\nResumo: {sucesso} processados com sucesso, {falhas} falhas.")
 
 ---
 
-## 4. Tolerância a PDFs Mal Formatados
+## 4. Redação Efetiva (Verdadeiro Tarjamento) e Tolerância a PDFs
 
+O **SEI-Anonimizer** implementa o verdadeiro tarjamento físico em PDFs, equivalente à ferramenta nativa de tarjamento do SEI:
+- **Expurgo Físico do Fluxo de Texto (*Content Streams*):** Os caracteres e glifos pertencentes aos dados sensíveis são suprimidos na raiz dos operadores de texto (`Tj`, `TJ`, blocos `BT...ET`). Não persiste nenhuma camada vetorial ou texto oculto por baixo das tarjas, impedindo a recuperação por seleção (`Ctrl+A`), leitores de tela ou OCR.
+- **Sanitização de Metadados e XMP:** Inspeciona e limpa os campos de cabeçalho (`/Title`, `/Author`, `/Subject`, `/Keywords`, `/Creator`) e remove fluxos XMP XML via `doc.del_xml_metadata()`, garantindo que nomes ou números de processo não permaneçam em propriedades do arquivo.
+- **Auditoria de Anotações:** Comentários, notas e popups flutuantes que sobreponham as áreas tarjadas ou contenham dados confidenciais são removidos automaticamente.
+- **Persistência de Layout:** Cabeçalhos, timbres, brasões da República e numerações de página são 100% preservados.
+
+### Tolerância a Formatações Anômalas
 Em muitos órgãos públicos, documentos impressos em PDF ou gerados por sistemas legados sofrem de distorções na camada de texto:
 
 1. **Espaçamento entre Letras (Kerning):** A palavra `Alberto` pode estar gravada como `A  l  b  e  r  t  o`.
 2. **Quebra de Linha:** Nomes ou termos compostos podem estar partidos entre duas linhas (`Alberto de\nCampos e Silva`).
 3. **Hifenização:** Separação silábica de final de linha (`Alber-\nto Silva`).
 
-O compilador `criar_regex_tolerante` no módulo `pdf_matcher.py` decompõe o termo dinamicamente:
-- Entre cada letra, permite separadores invisíveis, espaços nulos e traços.
-- Entre cada palavra, permite quebras de linha e hífens opcionais.
-- Ao encontrar a ocorrência real na camada de texto da página, recupera os retângulos geométricos exatos (`pymupdf.Rect`) correspondentes via PyMuPDF e aplica tarjas físicas definitivas (`add_redact_annot`).
+O compilador `criar_regex_tolerante` e a função `buscar_retangulos_resilientes` no módulo `pdf_matcher.py` decompõem o termo dinamicamente:
+- Entre cada letra, permitem separadores invisíveis, espaços nulos e traços.
+- Entre cada palavra, permitem quebras de linha e hífens opcionais.
+- Ao encontrar a ocorrência real na camada de texto da página, recuperam os retângulos geométricos exatos (`pymupdf.Rect`) correspondentes via PyMuPDF e aplicam tarjas físicas definitivas (`add_redact_annot` e `apply_redactions`).
 
 ---
 

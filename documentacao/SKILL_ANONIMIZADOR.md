@@ -205,6 +205,9 @@ opcoes = {
     "links": True,               # Remove anotações de hyperlinks clicáveis no PDF
     "nomes": False,              # Nomes próprios (manter False para boot ultrarrápido < 200ms)
     "modo_nomes": "iniciais",    # "iniciais" (A. C. S.) ou "total" ([NOME])
+    "modo_redacao_pdf": "tarja_preta", # "tarja_preta" (padrão SEI nativo), "tarja_branca", ou "mascara_texto"
+    "sanitizar_metadados": True, # Limpa /Title, /Author e expurga fluxos XMP XML do PDF
+    "limpar_anotacoes": True,    # Remove anotações flutuantes/comentários com dados sensíveis
     "termos_customizados": []    # Lista de termos específicos arbitrários
 }
 ```
@@ -222,6 +225,8 @@ config = {
     "doc_sei": True,
     "qr_code": True,
     "nomes": False,  # Boot rápido sem dependência de spaCy
+    "modo_redacao_pdf": "tarja_preta",  # Verdadeiro tarjamento SEI nativo com expurgo no stream
+    "sanitizar_metadados": True,        # Elimina dados sensíveis de metadados e XMP
     "termos_customizados": [
         "Mariana Souza e Silva",
         "Empresa XPTO Consultoria Ltda.",

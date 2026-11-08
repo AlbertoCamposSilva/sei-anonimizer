@@ -37,7 +37,7 @@ docx = None  # Carregado sob demanda em _processar_docx
 try:
     __version__ = version("sei_anonimizer")
 except PackageNotFoundError:
-    __version__ = "1.1.1"
+    __version__ = "1.2.0"
 
 # Importa módulos internos especializados
 from sei_anonimizer.gazetteer import (
@@ -48,7 +48,8 @@ from sei_anonimizer.gazetteer import (
 )
 from sei_anonimizer.pdf_matcher import (
     criar_regex_tolerante,
-    buscar_retangulos_resilientes
+    buscar_retangulos_resilientes,
+    ajustar_retangulo_seguranca
 )
 
 # Configuração de logger
@@ -168,7 +169,11 @@ class DocumentAnonimizer:
             "links": True,
             "nomes": False,
             "modo_nomes": "iniciais",
-            "termos_customizados": []
+            "termos_customizados": [],
+            "modo_redacao_pdf": "tarja_preta",
+            "sanitizar_metadados": True,
+            "redigir_imagens": False,
+            "limpar_anotacoes": True
         }
         if opcoes:
             self.opcoes.update(opcoes)
@@ -408,6 +413,392 @@ class DocumentAnonimizer:
             logger.error(f"Falha de processamento DOCX em {caminho_entrada}: {e}", exc_info=True)
             raise
 
+    def _adicionar_redacao_pdf(
+        self,
+        page: Any,
+        area: Any,
+        texto_substituto: str = "",
+        fill_custom: Optional[Tuple[float, float, float]] = None
+    ) -> Any:
+        """
+        Adiciona uma anotação de redação ao PDF em estrita conformidade com o modo configurado:
+        - "tarja_preta": fill=(0, 0, 0), text="" (Verdadeiro tarjamento SEI nativo, expurga operadores vetoriais).
+        - "tarja_branca": fill=(1, 1, 1), text="" (Tarja invisível/branca sem texto residual).
+        - "mascara_texto": fill=(1, 1, 1), text=texto_substituto (Carimbo de texto sobreposto).
+        """
+        modo = self.opcoes.get("modo_redacao_pdf", "tarja_preta")
+        area_ajustada = ajustar_retangulo_seguranca(area, padding=0.5)
+
+        if fill_custom is not None:
+            annot = page.add_redact_annot(area_ajustada, text="", fill=fill_custom)
+            annot.update()
+            return annot
+
+        if modo == "tarja_preta":
+            annot = page.add_redact_annot(area_ajustada, text="", fill=(0, 0, 0))
+            annot.update()
+        elif modo == "tarja_branca":
+            annot = page.add_redact_annot(area_ajustada, text="", fill=(1, 1, 1))
+            annot.update()
+        else:  # "mascara_texto"
+            tam = max(round(area.height * 0.75, 1), 6)
+            annot = page.add_redact_annot(
+                area_ajustada,
+                text=texto_substituto,
+                fontname="Helvetica",
+                fontsize=tam,
+                fill=(1, 1, 1)
+            )
+            annot.update()
+        return annot
+
+    def _obter_retangulos(self, page: Any, texto_pagina: str, termo: str) -> List[Any]:
+        """
+        Localiza os retângulos geométricos de um termo na página com resiliência a
+        kerning artificial, quebras de linha e translineação.
+        """
+        if not termo or not texto_pagina:
+            return []
+        rects = buscar_retangulos_resilientes(page, texto_pagina, termo)
+        if not rects:
+            rects = page.search_for(termo)
+        return rects
+
+    def _sanitizar_metadados_pdf(self, doc: Any, termos_anonimizados: Set[str]):
+        """
+        Inspeciona e limpa metadados do documento (/Title, /Author, /Subject, /Keywords, /Creator),
+        removendo referências confidenciais ou dados pessoais, e expurga fluxos XMP XML.
+        """
+        try:
+            palavras_sensiveis = set()
+            stopwords = {"DE", "DA", "DO", "DAS", "DOS", "E", "EM", "POR", "PARA", "COM", "SEM"}
+            for t in termos_anonimizados:
+                if not t:
+                    continue
+                t_limpo = t.strip()
+                if len(t_limpo) >= 3:
+                    palavras_sensiveis.add(t_limpo.lower())
+                for p in t_limpo.split():
+                    p_limpa = p.strip(".,;:\"'()[]{}")
+                    if len(p_limpa) >= 3 and p_limpa.upper() not in stopwords:
+                        palavras_sensiveis.add(p_limpa.lower())
+
+            meta = doc.metadata or {}
+            novo_meta = {}
+            for chave, valor in meta.items():
+                if valor is None:
+                    continue
+                if chave in ("title", "author", "subject", "keywords", "creator"):
+                    texto_val = str(valor)
+                    # No autor de documento público anonimizado, limpa sempre
+                    if chave == "author":
+                        novo_meta[chave] = ""
+                        continue
+
+                    texto_sanitizado = self._aplicar_substituicoes_texto(texto_val)
+
+                    for ps in palavras_sensiveis:
+                        rgx = re.compile(rf'\b{re.escape(ps)}\b', re.IGNORECASE)
+                        texto_sanitizado = rgx.sub("", texto_sanitizado)
+
+                    texto_sanitizado = re.sub(r'[\s,;]+', ' ', texto_sanitizado).strip(" ,;")
+                    novo_meta[chave] = texto_sanitizado
+                else:
+                    novo_meta[chave] = valor
+
+            doc.set_metadata(novo_meta)
+            if hasattr(doc, "del_xml_metadata"):
+                doc.del_xml_metadata()
+        except Exception as e:
+            logger.warning(f"Erro ao sanitizar metadados do PDF: {e}")
+
+    def _limpar_anotacoes_pdf(self, page: Any, termos_anonimizados: Set[str], rects_redigidos: List[Any]):
+        """
+        Inspeciona anotações do PDF (comentários, notas, destaques) e remove as que contenham
+        termos confidenciais ou que interceptem as áreas tarjadas.
+        """
+        try:
+            for annot in list(page.annots()):
+                if annot.type[0] == 12:  # 12 é PDF_ANNOT_REDACT no PyMuPDF
+                    continue
+
+                rect_annot = annot.rect
+                info = annot.info or {}
+                conteudo = (info.get("content") or "") + " " + (info.get("title") or "") + " " + (info.get("subject") or "")
+
+                remover = False
+                for r in rects_redigidos:
+                    if rect_annot.intersects(r):
+                        remover = True
+                        break
+
+                if not remover and conteudo.strip():
+                    for termo in termos_anonimizados:
+                        if termo and len(termo) >= 3 and termo.lower() in conteudo.lower():
+                            remover = True
+                            break
+
+                if remover:
+                    page.delete_annot(annot)
+        except Exception as e:
+            logger.warning(f"Erro ao auditar anotações da página: {e}")
+
+    def mapear_todas_tarjas_documento(self, doc: Any) -> Tuple[Dict[int, List[Dict[str, Any]]], Set[str]]:
+        """
+        Analisa todas as páginas do documento PDF e identifica as tarjas automáticas
+        de acordo com as regras ativas (CPF, RG, e-mail, telefone, nomes, doc SEI, QR Code, termos customizados).
+        
+        Returns:
+            Tuple com:
+            - mapa_tarjas: Dict[int, List[Dict[str, Any]]] onde cada item é {"rect": pymupdf.Rect, "tipo": str, "rotulo": str, "fill_custom": Optional[tuple]}
+            - todos_termos_anonimizados: Set[str] com todos os termos localizados.
+        """
+        try:
+            import pymupdf
+        except (ImportError, ModuleNotFoundError):
+            raise ImportError(
+                "A biblioteca pymupdf não está instalada. "
+                "Instale com: uv add \"sei-anonimizer[arquivos]\" ou pip install pymupdf"
+            )
+
+        termos_custom = self.opcoes.get("termos_customizados") or []
+        todos_termos_anonimizados: Set[str] = set(termos_custom)
+        mapa_tarjas: Dict[int, List[Dict[str, Any]]] = {}
+
+        for num_pag, page in enumerate(doc):
+            texto_pagina = page.get_text("text")
+            altura_pagina = page.rect.height
+            largura_pagina = page.rect.width
+            tarjas_pagina: List[Dict[str, Any]] = []
+
+            # 1. Tarjas de QR Code e Barra Lateral SEI
+            if self.opcoes.get("qr_code"):
+                rect_barra = pymupdf.Rect(largura_pagina - 25, 0, largura_pagina, altura_pagina)
+                tarjas_pagina.append({
+                    "rect": rect_barra,
+                    "tipo": "barra_sei",
+                    "rotulo": "Barra Lateral SEI",
+                    "fill_custom": (0, 0, 0)
+                })
+
+                areas_auth = page.search_for("A autenticidade do documento pode ser conferida no site")
+                if areas_auth:
+                    for area in areas_auth:
+                        rect_qr = pymupdf.Rect(area.x0 - 60, area.y0 - 10, area.x0, area.y1 + 40)
+                        tarjas_pagina.append({
+                            "rect": rect_qr,
+                            "tipo": "qr_code",
+                            "rotulo": "QR Code SEI",
+                            "fill_custom": (1, 1, 1)
+                        })
+
+            # 2. E-mails e Telefones
+            if self.opcoes.get("email_tel"):
+                for match in self.REGEX_EMAIL.finditer(texto_pagina):
+                    email_enc = match.group()
+                    todos_termos_anonimizados.add(email_enc)
+                    for area in self._obter_retangulos(page, texto_pagina, email_enc):
+                        tarjas_pagina.append({
+                            "rect": area,
+                            "tipo": "email",
+                            "rotulo": "[E-MAIL]",
+                            "fill_custom": None
+                        })
+
+                for match in self.REGEX_TELEFONE.finditer(texto_pagina):
+                    fone = match.group()
+                    if not self._eh_telefone_valido(texto_pagina, match.start(), match.end(), fone):
+                        continue
+                    todos_termos_anonimizados.add(fone)
+                    for area in self._obter_retangulos(page, texto_pagina, fone):
+                        tarjas_pagina.append({
+                            "rect": area,
+                            "tipo": "telefone",
+                            "rotulo": "[TEL]",
+                            "fill_custom": None
+                        })
+
+            # 3. CPF
+            if self.opcoes.get("cpf"):
+                for match in self.REGEX_CPF.finditer(texto_pagina):
+                    cpf = match.group()
+                    todos_termos_anonimizados.add(cpf)
+                    mascara = self.mascarar_cpf_fmt(cpf)
+                    for area in self._obter_retangulos(page, texto_pagina, cpf):
+                        tarjas_pagina.append({
+                            "rect": area,
+                            "tipo": "cpf",
+                            "rotulo": mascara,
+                            "fill_custom": None
+                        })
+
+                for match in self.REGEX_CPF_DESFORMATADO.finditer(texto_pagina):
+                    cpf_digitos = match.group(1)
+                    todos_termos_anonimizados.add(cpf_digitos)
+                    mascara = self.mascarar_cpf_fmt(cpf_digitos)
+                    for area in self._obter_retangulos(page, texto_pagina, cpf_digitos):
+                        tarjas_pagina.append({
+                            "rect": area,
+                            "tipo": "cpf",
+                            "rotulo": mascara,
+                            "fill_custom": None
+                        })
+
+            # 4. RG e Data de Expedição
+            if self.opcoes.get("rg"):
+                for match in self.REGEX_RG_CONTEXTO.finditer(texto_pagina):
+                    rg_num = match.group(1).strip()
+                    if rg_num:
+                        todos_termos_anonimizados.add(rg_num)
+                        for area in self._obter_retangulos(page, texto_pagina, rg_num):
+                            tarjas_pagina.append({
+                                "rect": area,
+                                "tipo": "rg",
+                                "rotulo": "RG: XXXXXX",
+                                "fill_custom": None
+                            })
+
+                for match in self.REGEX_DATA_EXP.finditer(texto_pagina):
+                    data_exp_texto = match.group(0)
+                    todos_termos_anonimizados.add(data_exp_texto)
+                    for area in self._obter_retangulos(page, texto_pagina, data_exp_texto):
+                        tarjas_pagina.append({
+                            "rect": area,
+                            "tipo": "data_exp",
+                            "rotulo": "Data de Expedição: XX/XX/XXXX",
+                            "fill_custom": None
+                        })
+
+            # 5. Documento SEI e CRC
+            if self.opcoes.get("doc_sei"):
+                limite_y_corte = altura_pagina * 0.85
+                areas_assinatura = page.search_for("Documento assinado eletronicamente por")
+                if areas_assinatura:
+                    limite_y_corte = min([r.y0 for r in areas_assinatura])
+
+                for match in self.REGEX_7_DIGITOS.finditer(texto_pagina):
+                    numero = match.group()
+                    areas = self._obter_retangulos(page, texto_pagina, numero)
+                    for area in areas:
+                        if area.y0 > limite_y_corte:
+                            todos_termos_anonimizados.add(numero)
+                            tarjas_pagina.append({
+                                "rect": area,
+                                "tipo": "doc_sei",
+                                "rotulo": self.mascarar_doc_7_digitos_fmt(numero),
+                                "fill_custom": None
+                            })
+
+                areas_auth = page.search_for("A autenticidade do documento pode ser conferida no site")
+                if areas_auth:
+                    y_auth = min([r.y0 for r in areas_auth])
+                    for match_crc in self.REGEX_CRC.finditer(texto_pagina):
+                        crc = match_crc.group()
+                        areas = self._obter_retangulos(page, texto_pagina, crc)
+                        for area in areas:
+                            if area.y0 >= y_auth:
+                                todos_termos_anonimizados.add(crc)
+                                tarjas_pagina.append({
+                                    "rect": area,
+                                    "tipo": "crc_sei",
+                                    "rotulo": "XXXXXXXX",
+                                    "fill_custom": (0, 0, 0)
+                                })
+
+            # 6. Termos Customizados Específicos
+            for termo_cust in termos_custom:
+                if not termo_cust or not termo_cust.strip():
+                    continue
+                todos_termos_anonimizados.add(termo_cust)
+                for r in self._obter_retangulos(page, texto_pagina, termo_cust):
+                    tarjas_pagina.append({
+                        "rect": r,
+                        "tipo": "custom",
+                        "rotulo": "[REMOVIDO]",
+                        "fill_custom": None
+                    })
+
+            # 7. Nomes Próprios Inteligentes
+            if self.opcoes.get("nomes"):
+                nomes_na_pagina = self.extrair_nomes_inteligente(texto_pagina)
+                for nome_original in nomes_na_pagina:
+                    todos_termos_anonimizados.add(nome_original)
+                    substituto = self._gerar_iniciais(nome_original) if self.opcoes.get("modo_nomes") == "iniciais" else "[NOME]"
+                    for area in self._obter_retangulos(page, texto_pagina, nome_original):
+                        tarjas_pagina.append({
+                            "rect": area,
+                            "tipo": "nome",
+                            "rotulo": substituto,
+                            "fill_custom": None
+                        })
+
+            mapa_tarjas[num_pag] = tarjas_pagina
+
+        return mapa_tarjas, todos_termos_anonimizados
+
+    def aplicar_tarjas_documento(
+        self,
+        doc: Any,
+        mapa_tarjas: Dict[int, List[Dict[str, Any]]],
+        termos_anonimizados: Set[str],
+        caminho_saida: str
+    ) -> str:
+        """
+        Aplica fisicamente as tarjas de todas as páginas, remove links, higieniza anotações,
+        sanitiza metadados e grava o arquivo de forma sanitizada irreversível.
+        """
+        try:
+            import pymupdf
+        except (ImportError, ModuleNotFoundError):
+            raise ImportError(
+                "A biblioteca pymupdf não está instalada. "
+                "Instale com: uv add \"sei-anonimizer[arquivos]\" ou pip install pymupdf"
+            )
+
+        for num_pag, page in enumerate(doc):
+            tarjas_da_pagina = mapa_tarjas.get(num_pag, [])
+            retangulos_pagina = [t["rect"] for t in tarjas_da_pagina]
+
+            # 1. Remoção de links se ativo
+            if self.opcoes.get("links"):
+                if hasattr(page, "delete_links"):
+                    page.delete_links()
+                else:
+                    for link in page.get_links():
+                        page.delete_link(link)
+
+            # 2. Adiciona as anotações de redação
+            for item in tarjas_da_pagina:
+                self._adicionar_redacao_pdf(
+                    page=page,
+                    area=item["rect"],
+                    texto_substituto=item.get("rotulo", ""),
+                    fill_custom=item.get("fill_custom")
+                )
+
+            # 3. Limpeza de anotações flutuantes
+            if self.opcoes.get("limpar_anotacoes"):
+                self._limpar_anotacoes_pdf(page, termos_anonimizados, retangulos_pagina)
+
+            # 4. Expurgo físico no Content Stream
+            modo_imagens = (
+                getattr(pymupdf, "PDF_REDACT_IMAGE_PIXELS", 2)
+                if (self.opcoes.get("redigir_imagens") or self.opcoes.get("qr_code"))
+                else getattr(pymupdf, "PDF_REDACT_IMAGE_NONE", 0)
+            )
+            page.apply_redactions(
+                images=modo_imagens,
+                graphics=1,
+                text=getattr(pymupdf, "PDF_REDACT_TEXT_REMOVE", 0)
+            )
+
+        # 5. Sanitização de metadados e expurgo de XML/XMP
+        if self.opcoes.get("sanitizar_metadados"):
+            self._sanitizar_metadados_pdf(doc, termos_anonimizados)
+
+        doc.save(caminho_saida, garbage=4, deflate=True)
+        return caminho_saida
+
     def _processar_pdf(self, caminho_entrada: str, caminho_saida: str) -> str:
         doc = None
         try:
@@ -424,136 +815,407 @@ class DocumentAnonimizer:
                 logger.warning(f"O documento {caminho_entrada} está protegido por senha. Ignorando.")
                 raise PermissionError("Arquivo PDF protegido por senha.")
 
-            termos_custom = self.opcoes.get("termos_customizados") or []
+            mapa_tarjas, termos_anon = self.mapear_todas_tarjas_documento(doc)
+            return self.aplicar_tarjas_documento(doc, mapa_tarjas, termos_anon, caminho_saida)
 
-            for page in doc:
-                texto_pagina = page.get_text("text")
-                altura_pagina = page.rect.height
-                largura_pagina = page.rect.width
+        except Exception as e:
+            logger.error(f"Falha de processamento PDF em {caminho_entrada}: {e}", exc_info=True)
+            raise
+        finally:
+            if doc:
+                doc.close()
 
-                # 1. Remoção de links
-                if self.opcoes.get("links"):
-                    if hasattr(page, "delete_links"):
-                        page.delete_links()
-                    else:
-                        for link in page.get_links():
-                            page.delete_link(link)
 
-                # 2. Tarjas de QR Code e Barra Lateral SEI
-                if self.opcoes.get("qr_code"):
-                    rect_barra = pymupdf.Rect(largura_pagina - 25, 0, largura_pagina, altura_pagina)
-                    annot = page.add_redact_annot(rect_barra, fill=(0, 0, 0))
-                    annot.update()
+_ToplevelBase = tk.Toplevel if tk is not None else object
 
-                    areas_auth = page.search_for("A autenticidade do documento pode ser conferida no site")
-                    if areas_auth:
-                        for area in areas_auth:
-                            rect_qr = pymupdf.Rect(area.x0 - 60, area.y0 - 10, area.x0, area.y1 + 40)
-                            annot = page.add_redact_annot(rect_qr, fill=(1, 1, 1))
-                            annot.update()
 
-                # 3. E-mails e Telefones
-                if self.opcoes.get("email_tel"):
-                    for match in self.REGEX_EMAIL.finditer(texto_pagina):
-                        for area in page.search_for(match.group()):
-                            tam = max(round(area.height * 0.75, 1), 6)
-                            annot = page.add_redact_annot(area, text="[E-MAIL]", fontname="Helvetica", fontsize=tam, fill=(1, 1, 1))
-                            annot.update()
+class JanelaTarjamentoPDF(_ToplevelBase):
+    """
+    Visualizador e Tarjador Interativo de PDFs para o SEI-Anonimizer.
 
-                    for match in self.REGEX_TELEFONE.finditer(texto_pagina):
-                        fone = match.group()
-                        if not self._eh_telefone_valido(texto_pagina, match.start(), match.end(), fone):
-                            continue
-                        for area in page.search_for(fone):
-                            tam = max(round(area.height * 0.75, 1), 6)
-                            annot = page.add_redact_annot(area, text="[TEL]", fontname="Helvetica", fontsize=tam, fill=(1, 1, 1))
-                            annot.update()
+    Renderiza o documento PDF em alta definição página por página no Canvas,
+    destaca as tarjas automáticas detectadas e permite ao operador:
+    - Desenhar novas tarjas manuais clicando e arrastando com o mouse;
+    - Remover tarjas específicas com o botão direito do mouse;
+    - Desfazer a última tarja ou limpar todas as tarjas da página;
+    - Navegar entre páginas com indicador de progresso;
+    - Aplicar o tarjamento físico definitivo e salvar o documento sanitizado.
+    """
 
-                # 4. CPF
-                if self.opcoes.get("cpf"):
-                    for match in self.REGEX_CPF.finditer(texto_pagina):
-                        cpf = match.group()
-                        mascara = self.mascarar_cpf_fmt(cpf)
-                        for area in page.search_for(cpf):
-                            tam = max(round(area.height * 0.75, 1), 6)
-                            annot = page.add_redact_annot(area, text=mascara, fontname="Helvetica", fontsize=tam, fill=(1, 1, 1))
-                            annot.update()
+    def __init__(
+        self,
+        parent: Any,
+        caminho_pdf: str,
+        opcoes: Dict[str, Any],
+        callback_conclusao: Optional[Any] = None
+    ):
+        if tk is None:
+            raise ImportError(
+                "A biblioteca Tkinter não está disponível neste ambiente. "
+                "Para uso programático ou em contêineres, utilize DocumentAnonimizer ou AnonimizadorTexto."
+            )
+        super().__init__(parent)
+        self.parent = parent
+        self.caminho_pdf = caminho_pdf
+        self.opcoes = opcoes
+        self.callback_conclusao = callback_conclusao
 
-                    for match in self.REGEX_CPF_DESFORMATADO.finditer(texto_pagina):
-                        cpf_digitos = match.group(1)
-                        mascara = self.mascarar_cpf_fmt(cpf_digitos)
-                        for area in page.search_for(cpf_digitos):
-                            tam = max(round(area.height * 0.75, 1), 6)
-                            annot = page.add_redact_annot(area, text=mascara, fontname="Helvetica", fontsize=tam, fill=(1, 1, 1))
-                            annot.update()
+        self.anonimizador = DocumentAnonimizer(opcoes=self.opcoes)
+        self.doc = None
 
-                # 5. RG e Data de Expedição
-                if self.opcoes.get("rg"):
-                    for match in self.REGEX_RG_CONTEXTO.finditer(texto_pagina):
-                        rg_num = match.group(1).strip()
-                        if rg_num:
-                            for area in page.search_for(rg_num):
-                                tam = max(round(area.height * 0.75, 1), 6)
-                                annot = page.add_redact_annot(area, text="RG: XXXXXX", fontname="Helvetica", fontsize=tam, fill=(1, 1, 1))
-                                annot.update()
+        try:
+            import pymupdf
+            self.pymupdf = pymupdf
+        except (ImportError, ModuleNotFoundError):
+            messagebox.showerror("Erro", "A biblioteca pymupdf é necessária para visualizar e tarjar PDFs.")
+            self.destroy()
+            return
 
-                    for match in self.REGEX_DATA_EXP.finditer(texto_pagina):
-                        for area in page.search_for(match.group(0)):
-                            tam = max(round(area.height * 0.75, 1), 6)
-                            annot = page.add_redact_annot(area, text="Data de Expedição: XX/XX/XXXX", fontname="Helvetica", fontsize=tam, fill=(1, 1, 1))
-                            annot.update()
+        try:
+            self.doc = self.pymupdf.open(self.caminho_pdf)
+            if self.doc.is_encrypted:
+                messagebox.showerror("Erro", "O documento PDF selecionado está protegido por senha.")
+                self.destroy()
+                return
+        except Exception as e:
+            messagebox.showerror("Erro ao Abrir PDF", f"Não foi possível abrir o arquivo PDF:\n{e}")
+            self.destroy()
+            return
 
-                # 6. Documento SEI e CRC
-                if self.opcoes.get("doc_sei"):
-                    limite_y_corte = altura_pagina * 0.85
-                    areas_assinatura = page.search_for("Documento assinado eletronicamente por")
-                    if areas_assinatura:
-                        limite_y_corte = min([r.y0 for r in areas_assinatura])
+        self.total_paginas = len(self.doc)
+        self.pag_atual = 0
+        self.dpi = 120
+        self.scale = self.dpi / 72.0
+        self.x_offset = 20
+        self.y_offset = 20
 
-                    for match in self.REGEX_7_DIGITOS.finditer(texto_pagina):
-                        numero = match.group()
-                        for area in page.search_for(numero):
-                            if area.y0 > limite_y_corte:
-                                tam = max(round(area.height * 0.75, 1), 6)
-                                annot = page.add_redact_annot(area, text=self.mascarar_doc_7_digitos_fmt(numero), fontname="Helvetica", fontsize=tam, align=1, fill=(1, 1, 1))
-                                annot.update()
+        # Histórico de tarjas para desfazer
+        self.historico_acoes = []
 
-                    areas_auth = page.search_for("A autenticidade do documento pode ser conferida no site")
-                    if areas_auth:
-                        y_auth = min([r.y0 for r in areas_auth])
-                        for match_crc in self.REGEX_CRC.finditer(texto_pagina):
-                            crc = match_crc.group()
-                            for area in page.search_for(crc):
-                                if area.y0 >= y_auth:
-                                    tam = max(round(area.height * 0.75, 1), 6)
-                                    annot = page.add_redact_annot(area, text="XXXXXXXX", fontname="Helvetica", fontsize=tam, align=1, fill=(0, 0, 0))
-                                    annot.update()
+        # Pré-carrega tarjas automáticas
+        self.mapa_tarjas, self.termos_anon = self.anonimizador.mapear_todas_tarjas_documento(self.doc)
 
-                # 7. Termos Customizados Específicos do Usuário (Motor Resiliente)
-                for termo_cust in termos_custom:
-                    if not termo_cust or not termo_cust.strip():
-                        continue
-                    retangulos_cust = buscar_retangulos_resilientes(page, texto_pagina, termo_cust)
-                    for r in retangulos_cust:
-                        tam = max(round(r.height * 0.75, 1), 6)
-                        annot = page.add_redact_annot(r, text="[REMOVIDO]", fontname="Helvetica", fontsize=tam, fill=(1, 1, 1))
-                        annot.update()
+        # Variáveis de interação de desenho
+        self.drag_start_x = None
+        self.drag_start_y = None
+        self.rect_preview_id = None
+        self.img_tk = None
 
-                # 8. Nomes Próprios Inteligentes (Multi-Camadas com Tolerância a PDFs)
-                if self.opcoes.get("nomes"):
-                    nomes_na_pagina = self.extrair_nomes_inteligente(texto_pagina)
-                    for nome_original in nomes_na_pagina:
-                        substituto = self._gerar_iniciais(nome_original) if self.opcoes.get("modo_nomes") == "iniciais" else "[NOME]"
-                        retangulos_nome = buscar_retangulos_resilientes(page, texto_pagina, nome_original)
-                        for area in retangulos_nome:
-                            tam = max(round(area.height * 0.75, 1), 6)
-                            annot = page.add_redact_annot(area, text=substituto, fontname="Helvetica", fontsize=tam, fill=(1, 1, 1))
-                            annot.update()
+        self._configurar_janela()
+        self._construir_interface()
+        self._renderizar_pagina_atual()
 
-                page.apply_redactions()
+    def _configurar_janela(self):
+        nome_arq = os.path.basename(self.caminho_pdf)
+        self.title(f"Visualizador e Tarjador Interativo de PDF - {nome_arq}")
+        self.geometry("1100x820")
+        self.minsize(800, 600)
+        self.configure(bg="#f1f5f9")
+        self.protocol("WM_DELETE_WINDOW", self._cancelar)
+        self.transient(self.parent)
+        self.grab_set()
 
-            doc.save(caminho_saida, garbage=4, deflate=True)
-            return caminho_saida
+    def _construir_interface(self):
+        # 1. Barra de Topo com Informações do Documento
+        topo_frame = tk.Frame(self, bg="#0f4c81", padx=15, pady=8)
+        topo_frame.pack(fill=tk.X)
+
+        lbl_titulo = tk.Label(
+            topo_frame,
+            text=f"Tarjamento de PDF: {os.path.basename(self.caminho_pdf)}",
+            font=("Segoe UI", 11, "bold"),
+            fg="#ffffff",
+            bg="#0f4c81"
+        )
+        lbl_titulo.pack(side=tk.LEFT)
+
+        modo_nome = self.opcoes.get("modo_redacao_pdf", "tarja_preta")
+        lbl_modo = tk.Label(
+            topo_frame,
+            text=f"Modo: {modo_nome.replace('_', ' ').title()}",
+            font=("Segoe UI", 9),
+            fg="#cbd5e1",
+            bg="#0f4c81"
+        )
+        lbl_modo.pack(side=tk.RIGHT)
+
+        # 2. Barra de Ferramentas e Navegação
+        toolbar = tk.Frame(self, bg="#ffffff", relief="ridge", bd=1, padx=12, pady=6)
+        toolbar.pack(fill=tk.X)
+
+        self.btn_ant = ttk.Button(toolbar, text="◀ Anterior", command=self._pagina_anterior)
+        self.btn_ant.pack(side=tk.LEFT, padx=(0, 6))
+
+        self.lbl_pag = ttk.Label(
+            toolbar,
+            text=f"Página {self.pag_atual + 1} de {self.total_paginas}",
+            font=("Segoe UI", 9, "bold")
+        )
+        self.lbl_pag.pack(side=tk.LEFT, padx=6)
+
+        self.btn_prox = ttk.Button(toolbar, text="Próxima ▶", command=self._pagina_proxima)
+        self.btn_prox.pack(side=tk.LEFT, padx=(6, 15))
+
+        ttk.Separator(toolbar, orient="vertical").pack(side=tk.LEFT, fill=tk.Y, padx=8)
+
+        btn_desfazer = ttk.Button(toolbar, text="Desfazer Última Tarja", command=self._desfazer_ultima)
+        btn_desfazer.pack(side=tk.LEFT, padx=4)
+
+        btn_limpar = ttk.Button(toolbar, text="Limpar Tarjas Desta Página", command=self._limpar_pagina)
+        btn_limpar.pack(side=tk.LEFT, padx=4)
+
+        self.lbl_contador = ttk.Label(
+            toolbar,
+            text="",
+            font=("Segoe UI", 9)
+        )
+        self.lbl_contador.pack(side=tk.RIGHT, padx=10)
+
+        # 3. Faixa de Instruções e Dicas
+        dica_frame = tk.Frame(self, bg="#f8fafc", padx=12, pady=4, relief="solid", bd=1)
+        dica_frame.pack(fill=tk.X)
+
+        lbl_dica = tk.Label(
+            dica_frame,
+            text="📌 Clique e arraste o mouse para criar novas tarjas manuais (vermelho). "
+                 "Tarjas automáticas aparecem em azul. "
+                 "Clique com o botão direito sobre uma tarja para excluí-la.",
+            font=("Segoe UI", 8),
+            fg="#475569",
+            bg="#f8fafc"
+        )
+        lbl_dica.pack(side=tk.LEFT)
+
+        # 4. Área Central do Canvas com Barras de Rolagem
+        canvas_container = tk.Frame(self, bg="#334155")
+        canvas_container.pack(fill=tk.BOTH, expand=True)
+
+        self.canvas = tk.Canvas(canvas_container, bg="#334155", cursor="cross", highlightthickness=0)
+        v_scroll = ttk.Scrollbar(canvas_container, orient=tk.VERTICAL, command=self.canvas.yview)
+        h_scroll = ttk.Scrollbar(canvas_container, orient=tk.HORIZONTAL, command=self.canvas.xview)
+
+        self.canvas.configure(xscrollcommand=h_scroll.set, yscrollcommand=v_scroll.set)
+
+        v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.canvas.bind("<ButtonPress-1>", self._on_press)
+        self.canvas.bind("<B1-Motion>", self._on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        self.canvas.bind("<Button-3>", self._on_right_click)
+        self.canvas.bind("<MouseWheel>", self._on_mouse_wheel)
+
+        # 5. Barra Inferior de Ação
+        rodape = tk.Frame(self, bg="#ffffff", relief="ridge", bd=1, padx=15, pady=8)
+        rodape.pack(side=tk.BOTTOM, fill=tk.X)
+
+        btn_cancelar = ttk.Button(rodape, text="Cancelar", command=self._cancelar)
+        btn_cancelar.pack(side=tk.LEFT)
+
+        btn_salvar = ttk.Button(
+            rodape,
+            text="✔ Aplicar Tarjamento e Salvar PDF...",
+            style="AcaoPrincipal.TButton",
+            command=self._salvar_e_aplicar
+        )
+        btn_salvar.pack(side=tk.RIGHT)
+
+    def _renderizar_pagina_atual(self):
+        if not self.doc or self.pag_atual >= self.total_paginas:
+            return
+
+        self.canvas.delete("all")
+        page = self.doc[self.pag_atual]
+        pix = page.get_pixmap(dpi=self.dpi)
+        self.img_tk = tk.PhotoImage(data=pix.tobytes("png"))
+
+        self.canvas.create_image(self.x_offset, self.y_offset, anchor="nw", image=self.img_tk, tags="page_img")
+
+        total_w = pix.width + (self.x_offset * 2)
+        total_h = pix.height + (self.y_offset * 2)
+        self.canvas.config(scrollregion=(0, 0, total_w, total_h))
+
+        self.lbl_pag.config(text=f"Página {self.pag_atual + 1} de {self.total_paginas}")
+        self.btn_ant.config(state="normal" if self.pag_atual > 0 else "disabled")
+        self.btn_prox.config(state="normal" if self.pag_atual < self.total_paginas - 1 else "disabled")
+
+        self._desenhar_tarjas_pagina()
+
+    def _desenhar_tarjas_pagina(self):
+        self.canvas.delete("tarja_tag")
+        tarjas = self.mapa_tarjas.get(self.pag_atual, [])
+
+        for idx, item in enumerate(tarjas):
+            rect = item["rect"]
+            sx0 = rect.x0 * self.scale + self.x_offset
+            sy0 = rect.y0 * self.scale + self.y_offset
+            sx1 = rect.x1 * self.scale + self.x_offset
+            sy1 = rect.y1 * self.scale + self.y_offset
+
+            tipo = item.get("tipo", "manual")
+            is_manual = (tipo == "manual")
+            outline_color = "#ef4444" if is_manual else "#2563eb"
+
+            self.canvas.create_rectangle(
+                sx0, sy0, sx1, sy1,
+                fill="#000000",
+                stipple="gray75",
+                outline=outline_color,
+                width=2,
+                tags=("tarja_tag", f"tarja_{idx}")
+            )
+
+            rotulo = "Tarja Manual" if is_manual else item.get("rotulo", "Automática")
+            if (sy1 - sy0) >= 10 and (sx1 - sx0) >= 25:
+                self.canvas.create_text(
+                    sx0 + 4, max(sy0 - 7, self.y_offset),
+                    anchor="nw",
+                    text=rotulo[:20],
+                    font=("Segoe UI", 7, "bold"),
+                    fill=outline_color,
+                    tags=("tarja_tag", f"tarja_txt_{idx}")
+                )
+
+        total_doc = sum(len(t) for t in self.mapa_tarjas.values())
+        self.lbl_contador.config(text=f"Tarjas nesta página: {len(tarjas)} | Total no documento: {total_doc}")
+
+    def _pagina_anterior(self):
+        if self.pag_atual > 0:
+            self.pag_atual -= 1
+            self._renderizar_pagina_atual()
+
+    def _pagina_proxima(self):
+        if self.pag_atual < self.total_paginas - 1:
+            self.pag_atual += 1
+            self._renderizar_pagina_atual()
+
+    def _on_mouse_wheel(self, event):
+        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    def _on_press(self, event):
+        self.drag_start_x = self.canvas.canvasx(event.x)
+        self.drag_start_y = self.canvas.canvasy(event.y)
+        self.rect_preview_id = self.canvas.create_rectangle(
+            self.drag_start_x, self.drag_start_y,
+            self.drag_start_x, self.drag_start_y,
+            outline="#ef4444",
+            width=2,
+            dash=(4, 2)
+        )
+
+    def _on_drag(self, event):
+        if self.rect_preview_id:
+            cur_x = self.canvas.canvasx(event.x)
+            cur_y = self.canvas.canvasy(event.y)
+            self.canvas.coords(self.rect_preview_id, self.drag_start_x, self.drag_start_y, cur_x, cur_y)
+
+    def _on_release(self, event):
+        if not self.rect_preview_id:
+            return
+
+        end_x = self.canvas.canvasx(event.x)
+        end_y = self.canvas.canvasy(event.y)
+        self.canvas.delete(self.rect_preview_id)
+        self.rect_preview_id = None
+
+        if abs(end_x - self.drag_start_x) < 5 or abs(end_y - self.drag_start_y) < 5:
+            return
+
+        page = self.doc[self.pag_atual]
+        px0 = (min(self.drag_start_x, end_x) - self.x_offset) / self.scale
+        py0 = (min(self.drag_start_y, end_y) - self.y_offset) / self.scale
+        px1 = (max(self.drag_start_x, end_x) - self.x_offset) / self.scale
+        py1 = (max(self.drag_start_y, end_y) - self.y_offset) / self.scale
+
+        px0 = max(0.0, min(float(page.rect.width), px0))
+        py0 = max(0.0, min(float(page.rect.height), py0))
+        px1 = max(0.0, min(float(page.rect.width), px1))
+        py1 = max(0.0, min(float(page.rect.height), py1))
+
+        if (px1 - px0) >= 3 and (py1 - py0) >= 3:
+            novo_rect = self.pymupdf.Rect(px0, py0, px1, py1)
+            item = {"rect": novo_rect, "tipo": "manual", "rotulo": "Manual", "fill_custom": None}
+            if self.pag_atual not in self.mapa_tarjas:
+                self.mapa_tarjas[self.pag_atual] = []
+            self.mapa_tarjas[self.pag_atual].append(item)
+            self.historico_acoes.append((self.pag_atual, item))
+            self._desenhar_tarjas_pagina()
+
+    def _on_right_click(self, event):
+        cx = self.canvas.canvasx(event.x)
+        cy = self.canvas.canvasy(event.y)
+
+        px = (cx - self.x_offset) / self.scale
+        py = (cy - self.y_offset) / self.scale
+
+        tarjas = self.mapa_tarjas.get(self.pag_atual, [])
+        for i in reversed(range(len(tarjas))):
+            rect = tarjas[i]["rect"]
+            if rect.contains(self.pymupdf.Point(px, py)):
+                tarjas.pop(i)
+                self._desenhar_tarjas_pagina()
+                break
+
+    def _desfazer_ultima(self):
+        if self.historico_acoes:
+            pag, item = self.historico_acoes.pop()
+            if pag in self.mapa_tarjas and item in self.mapa_tarjas[pag]:
+                self.mapa_tarjas[pag].remove(item)
+                if self.pag_atual == pag:
+                    self._desenhar_tarjas_pagina()
+        elif self.mapa_tarjas.get(self.pag_atual):
+            self.mapa_tarjas[self.pag_atual].pop()
+            self._desenhar_tarjas_pagina()
+
+    def _limpar_pagina(self):
+        if self.pag_atual in self.mapa_tarjas:
+            self.mapa_tarjas[self.pag_atual].clear()
+            self._desenhar_tarjas_pagina()
+
+    def _cancelar(self):
+        if self.doc:
+            try:
+                self.doc.close()
+            except Exception:
+                pass
+        self.destroy()
+
+    def _salvar_e_aplicar(self):
+        pasta_origem = os.path.dirname(self.caminho_pdf)
+        nome_origem = os.path.basename(self.caminho_pdf)
+        sugestao_nome = os.path.splitext(nome_origem)[0] + "_anonimizado.pdf"
+
+        caminho_saida = filedialog.asksaveasfilename(
+            parent=self,
+            title="Salvar PDF Tarjado Sanitizado",
+            initialdir=pasta_origem,
+            initialfile=sugestao_nome,
+            filetypes=[("Documento PDF", "*.pdf")]
+        )
+        if not caminho_saida:
+            return
+
+        if not caminho_saida.lower().endswith(".pdf"):
+            caminho_saida += ".pdf"
+
+        try:
+            resultado = self.anonimizador.aplicar_tarjas_documento(
+                doc=self.doc,
+                mapa_tarjas=self.mapa_tarjas,
+                termos_anonimizados=self.termos_anon,
+                caminho_saida=caminho_saida
+            )
+            messagebox.showinfo(
+                "Tarjamento Concluído",
+                f"O documento foi tarjado e sanitizado com sucesso!\n\nSalvo em:\n{resultado}",
+                parent=self
+            )
+            if self.callback_conclusao:
+                self.callback_conclusao(resultado)
+            self._cancelar()
+        except Exception as e:
+            messagebox.showerror("Erro ao Salvar", f"Falha ao aplicar tarjamento no PDF:\n{e}", parent=self)
 
         except Exception as e:
             logger.error(f"Falha de processamento PDF em {caminho_entrada}: {e}", exc_info=True)
@@ -590,7 +1252,10 @@ class AppAnonimizer:
             "qr_code": tk.BooleanVar(value=True),
             "links": tk.BooleanVar(value=True),
             "nomes": tk.BooleanVar(value=False),  # Desmarcado por padrão (Lazy Loading)
-            "modo_nomes": tk.StringVar(value="iniciais")
+            "modo_nomes": tk.StringVar(value="iniciais"),
+            "modo_redacao_pdf": tk.StringVar(value="tarja_preta"),
+            "sanitizar_metadados": tk.BooleanVar(value=True),
+            "abrir_visualizador": tk.BooleanVar(value=True)
         }
 
         self.is_processando = False
@@ -713,6 +1378,58 @@ class AppAnonimizer:
             style="Card.TRadiobutton"
         )
         self.rb_total.pack(anchor="w", pady=1)
+
+        ttk.Separator(card_regras, orient='horizontal').pack(fill='x', pady=8)
+
+        # Subseção Estilo de Tarjamento e Redação em PDFs
+        lbl_sub_tarja = ttk.Label(card_regras, text="Estilo de Tarjamento e Redação em PDFs:", style="CardTexto.TLabel", font=("Segoe UI", 9, "bold"))
+        lbl_sub_tarja.pack(anchor="w", padx=10, pady=(2, 4))
+
+        frame_tarja = ttk.Frame(card_regras, style="Card.TFrame")
+        frame_tarja.pack(anchor="w", padx=20, pady=(0, 4))
+
+        rb_tarja_preta = ttk.Radiobutton(
+            frame_tarja,
+            text="Tarja Preta Efetiva (Padrão SEI nativo - expurgo físico sem texto residual)",
+            variable=self.vars["modo_redacao_pdf"],
+            value="tarja_preta",
+            style="Card.TRadiobutton"
+        )
+        rb_tarja_preta.pack(anchor="w", pady=1)
+
+        rb_tarja_branca = ttk.Radiobutton(
+            frame_tarja,
+            text="Tarja Branca Efetiva (Ocultação limpa/invisível - sem texto residual)",
+            variable=self.vars["modo_redacao_pdf"],
+            value="tarja_branca",
+            style="Card.TRadiobutton"
+        )
+        rb_tarja_branca.pack(anchor="w", pady=1)
+
+        rb_mascara_texto = ttk.Radiobutton(
+            frame_tarja,
+            text="Substituição com Texto Mascarado (ex: [E-MAIL], ***.123.456-**, [NOME])",
+            variable=self.vars["modo_redacao_pdf"],
+            value="mascara_texto",
+            style="Card.TRadiobutton"
+        )
+        rb_mascara_texto.pack(anchor="w", pady=1)
+
+        chk_meta = ttk.Checkbutton(
+            card_regras,
+            text="Sanitizar Metadados e Propriedades do Arquivo (Título, Autor, Tags XMP/XML)",
+            variable=self.vars["sanitizar_metadados"],
+            style="Card.TCheckbutton"
+        )
+        chk_meta.pack(anchor="w", padx=10, pady=(6, 2))
+
+        chk_vis = ttk.Checkbutton(
+            card_regras,
+            text="Abrir Visualizador Interativo para Tarjamento Manual (exclusivo para PDF)",
+            variable=self.vars["abrir_visualizador"],
+            style="Card.TCheckbutton"
+        )
+        chk_vis.pack(anchor="w", padx=10, pady=(2, 4))
 
         # CARTÃO 2: Termos Específicos Customizados
         card_termos = ttk.Frame(scrollable_frame, style="Card.TFrame", padding=12)
@@ -856,6 +1573,30 @@ class AppAnonimizer:
             messagebox.showinfo("Informação", "Nenhum arquivo compatível (.pdf, .docx, .txt) localizado na seleção.")
             return
 
+        # Fluxo interativo exclusivo para arquivos PDF individuais
+        if tipo_origem != "diretorio" and len(arquivos_selecionados) == 1:
+            arq_unico = arquivos_selecionados[0]
+            ext = arq_unico.lower().split('.')[-1]
+            if ext == "pdf" and self.vars["abrir_visualizador"].get():
+                opcoes = {k: v.get() for k, v in self.vars.items()}
+                opcoes["termos_customizados"] = self._obter_termos_customizados()
+
+                def _ao_concluir_tarjamento(caminho_gerado):
+                    self._adicionar_log(f"Tarjamento interativo concluído com sucesso: {os.path.basename(caminho_gerado)}")
+
+                JanelaTarjamentoPDF(
+                    parent=self.root,
+                    caminho_pdf=arq_unico,
+                    opcoes=opcoes,
+                    callback_conclusao=_ao_concluir_tarjamento
+                )
+                return
+            elif ext in ("docx", "txt") and self.vars["abrir_visualizador"].get():
+                self._adicionar_log(
+                    f"Nota: Arquivo .{ext} processado automaticamente por substituição textual "
+                    f"(a seleção gráfica manual é exclusiva para documentos em PDF)."
+                )
+
         # Prepara opções
         opcoes = {k: v.get() for k, v in self.vars.items()}
         opcoes["termos_customizados"] = self._obter_termos_customizados()
@@ -883,6 +1624,10 @@ class AppAnonimizer:
         termos_custom = opcoes.get("termos_customizados") or []
         if termos_custom:
             self.root.after(0, lambda: self._adicionar_log(f"Termos específicos ativos: {len(termos_custom)} termo(s)"))
+
+        modo_red = opcoes.get("modo_redacao_pdf", "tarja_preta")
+        meta_status = "Ativa" if opcoes.get("sanitizar_metadados") else "Inativa"
+        self.root.after(0, lambda: self._adicionar_log(f"Modo de redação PDF: {modo_red} | Sanitização de Metadados: {meta_status}"))
 
         if opcoes.get("nomes"):
             self.root.after(0, lambda: self._adicionar_log("Opção de nomes ativa: verificando e carregando componentes de linguagem..."))

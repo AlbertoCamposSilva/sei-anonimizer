@@ -97,7 +97,35 @@ def buscar_retangulos_resilientes(page: Any, texto_pagina: str, termo: str) -> L
         palavras_match = match_str.split()
         for p in palavras_match:
             p_limpa = p.strip(".,;:\"'()[]{}")
-            if len(p_limpa) >= 2:
-                rects_encontrados.extend(page.search_for(p_limpa))
+            if len(p_limpa) >= 1:
+                sub_areas = page.search_for(p_limpa)
+                if sub_areas:
+                    rects_encontrados.extend(sub_areas)
 
     return rects_encontrados
+
+
+def ajustar_retangulo_seguranca(rect: Any, padding: float = 0.5) -> Any:
+    """
+    Expande ligeiramente o retângulo geométrico em frações de ponto tipográfico (padding)
+    para assegurar que serifas, diacríticos, acentos ou artefatos de renderização
+    sejam integralmente suprimidos e cobertos pela tarja.
+    
+    Args:
+        rect: O retângulo pymupdf.Rect.
+        padding: Expansão em pontos (padrão 0.5 pt).
+        
+    Returns:
+        Novo pymupdf.Rect expandido.
+    """
+    try:
+        import pymupdf
+        return pymupdf.Rect(
+            rect.x0 - padding,
+            rect.y0 - padding,
+            rect.x1 + padding,
+            rect.y1 + padding
+        )
+    except Exception:
+        return rect
+

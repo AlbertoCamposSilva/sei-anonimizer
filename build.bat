@@ -14,6 +14,7 @@ uv run --with nuitka python -m nuitka ^
   --onefile-windows-splash-screen-image=src/sei_anonimizer/loading.png ^
   --include-package=sei_anonimizer ^
   --include-package=pymupdf ^
+  --include-package-data=pymupdf ^
   --include-package=docx ^
   --include-distribution-metadata=sei-anonimizer ^
   --nofollow-import-to=spacy ^
